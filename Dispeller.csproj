@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>2.0</Version>
-    <Description>Analyze your Glamour Dresser for shared models, recoverable slots, Armoire opportunities, and changes over time.</Description>
+    <Version>2.1.0</Version>
+    <Description>Analyze your Glamour Dresser for shared models, recoverable slots, Armoire opportunities, and safely restore recommended duplicates to inventory.</Description>
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

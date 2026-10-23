@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
@@ -20,6 +21,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
     [PluginService] internal static IFramework Framework { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
+    [PluginService] internal static IChatGui ChatGui { get; private set; } = null!;
 
     private const string CommandName = "/dispeller";
 
@@ -28,6 +30,7 @@ public sealed class Plugin : IDalamudPlugin
     public ItemMetadataService ItemMetadataService { get; }
     public SnapshotService SnapshotService { get; }
     public DuplicateAnalyzer DuplicateAnalyzer { get; }
+    public DresserDuplicateRemover DuplicateRemover { get; }
 
     public readonly WindowSystem WindowSystem = new("Dispeller");
     private readonly MainWindow mainWindow;
@@ -40,6 +43,14 @@ public sealed class Plugin : IDalamudPlugin
         SnapshotService = new SnapshotService(PluginInterface, PlayerState, Log);
         DuplicateAnalyzer = new DuplicateAnalyzer(ItemMetadataService);
         DresserScanner = new DresserScanner(Framework, Log);
+        DuplicateRemover = new DresserDuplicateRemover(
+            Framework,
+            Log,
+            ChatGui,
+            DresserScanner,
+            DuplicateAnalyzer,
+            SnapshotService,
+            Configuration);
         DresserScanner.Updated += OnDresserUpdated;
 
         mainWindow = new MainWindow(this);
@@ -50,13 +61,13 @@ public sealed class Plugin : IDalamudPlugin
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Open Dispeller - analyze shared glamour models and potential dresser savings.",
+            HelpMessage = "Open Dispeller. Use /dispeller clean to restore recommended duplicate glamours to inventory, or /dispeller stop to cancel cleanup.",
         });
 
         PluginInterface.UiBuilder.Draw += WindowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi += ToggleMainUi;
 
-        Log.Information("Dispeller 2.0 loaded.");
+        Log.Information("Dispeller 2.1 loaded.");
     }
 
     private void OnDresserUpdated(IReadOnlyList<DresserItem> items)
@@ -73,6 +84,9 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnCharacterChanged()
     {
+        if (DuplicateRemover.IsRunning)
+            DuplicateRemover.Cancel();
+
         DresserScanner.ClearCache();
         mainWindow.NotifyCharacterChanged();
     }
@@ -89,14 +103,33 @@ public sealed class Plugin : IDalamudPlugin
         WindowSystem.RemoveAllWindows();
 
         mainWindow.Dispose();
+        DuplicateRemover.Dispose();
         DresserScanner.Dispose();
         ItemMetadataService.Dispose();
 
         CommandManager.RemoveHandler(CommandName);
     }
 
-    private void OnCommand(string command, string args) =>
+    private void OnCommand(string command, string args)
+    {
+        var action = args.Trim();
+
+        if (action.Equals("clean", StringComparison.OrdinalIgnoreCase) ||
+            action.Equals("remove", StringComparison.OrdinalIgnoreCase))
+        {
+            DuplicateRemover.Start();
+            return;
+        }
+
+        if (action.Equals("stop", StringComparison.OrdinalIgnoreCase) ||
+            action.Equals("cancel", StringComparison.OrdinalIgnoreCase))
+        {
+            DuplicateRemover.Cancel();
+            return;
+        }
+
         mainWindow.Toggle();
+    }
 
     public void ToggleMainUi() =>
         mainWindow.Toggle();

@@ -14,6 +14,8 @@ namespace Dispeller.Services;
 public sealed class DresserScanner : IDisposable
 {
     private const long PollIntervalMs = 750;
+    private const uint PrismBoxSlotCount = 800;
+    private const uint ItemIdModulo = 1_000_000;
     private const ulong FnvOffsetBasis = 14695981039346656037UL;
     private const ulong FnvPrime = 1099511628211UL;
 
@@ -87,19 +89,23 @@ public sealed class DresserScanner : IDisposable
 
             foreach (var item in agent->Data->PrismBoxItems)
             {
-                if (item.ItemId == 0)
+                // The client array also contains non-storage display/outfit entries. Only 0-799 are
+                // actual Glamour Dresser slots that MirageManager.RestorePrismBoxItem can restore.
+                if (item.ItemId == 0 || item.Slot >= PrismBoxSlotCount)
                     continue;
 
                 var stain1 = item.Stains[0];
                 var stain2 = item.Stains[1];
+                var baseItemId = item.ItemId % ItemIdModulo;
 
                 items.Add(new DresserItem(
                     item.Slot,
-                    item.ItemId,
+                    baseItemId,
                     item.IconId,
                     stain1,
                     stain2));
 
+                // Keep the raw item id in the fingerprint so HQ/modifier changes still invalidate the cache.
                 fingerprint = Hash(fingerprint, item.Slot);
                 fingerprint = Hash(fingerprint, item.ItemId);
                 fingerprint = Hash(fingerprint, item.IconId);
