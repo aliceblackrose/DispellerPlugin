@@ -2,7 +2,7 @@
   "Author": "aliceblackrose",
   "Name": "Dispeller",
   "InternalName": "Dispeller",
-  "AssemblyVersion": "2.1.0",
+  "AssemblyVersion": "2.2.0",
   "Description": "Analyze your Glamour Dresser for shared models and safely restore recommended duplicate-model items to inventory.",
   "Punchline": "Find duplicate glamours and reclaim dresser space.",
   "ApplicableVersion": "any",
