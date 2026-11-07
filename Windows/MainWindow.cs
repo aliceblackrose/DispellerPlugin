@@ -8,6 +8,7 @@ using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using Dispeller.Models;
+using Dispeller.Services;
 
 namespace Dispeller.Windows;
 
@@ -22,6 +23,9 @@ public sealed class MainWindow : Window, IDisposable
     private string statusMessage = "Ready.";
     private bool initialLoadAttempted;
     private bool dresserChangedSinceAnalysis;
+    private DresserDuplicateRemover.CleanupPreview? pendingAutoCleanPreview;
+
+    private const string AutoCleanPopupId = "Confirm Auto-Clean##Dispeller";
 
     private static readonly Vector4 DarkPurple = new(0.28f, 0.20f, 0.45f, 1.00f);
     private static readonly Vector4 SoftMagenta = new(0.78f, 0.37f, 0.64f, 1.00f);
@@ -58,6 +62,7 @@ public sealed class MainWindow : Window, IDisposable
         result = null;
         initialLoadAttempted = false;
         dresserChangedSinceAnalysis = false;
+        pendingAutoCleanPreview = null;
         statusMessage = "Character changed. Loading this character's dresser snapshot...";
     }
 
@@ -71,6 +76,7 @@ public sealed class MainWindow : Window, IDisposable
 
         DrawHeader();
         DrawToolbar();
+        DrawAutoCleanConfirmation();
         DrawStatus();
 
         if (result != null)
@@ -105,7 +111,7 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.SetCursorPosX(ImGui.GetCursorPosX() + 14);
         ImGui.PushStyleColor(ImGuiCol.Text, BrightWhite);
         ImGui.SetWindowFontScale(1.18f);
-        ImGui.TextUnformatted("✨ Dispeller 2.0");
+        ImGui.TextUnformatted("✨ Dispeller 2.2");
         ImGui.SetWindowFontScale(1.0f);
         ImGui.PopStyleColor();
 
@@ -129,6 +135,36 @@ public sealed class MainWindow : Window, IDisposable
         if (ImGui.Button("Re-analyze"))
             AnalyzeCurrentItems();
 
+        ImGui.SameLine();
+        if (plugin.DuplicateRemover.IsRunning)
+        {
+            ImGui.TextUnformatted(
+                $"Auto-Clean: {plugin.DuplicateRemover.RemovedCount}/{plugin.DuplicateRemover.RequestedCount} restored, " +
+                $"{plugin.DuplicateRemover.SkippedCount} skipped.");
+            ImGui.SameLine();
+            if (ImGui.Button("Stop Auto-Clean"))
+            {
+                plugin.DuplicateRemover.Cancel();
+                statusMessage = "Auto-Clean stopped.";
+            }
+        }
+        else if (ImGui.Button("Auto-Clean Duplicates"))
+        {
+            pendingAutoCleanPreview = plugin.DuplicateRemover.Preview();
+            if (pendingAutoCleanPreview is { CandidateCount: > 0 } preview)
+            {
+                LoadBestAvailableData(refreshIfOpen: false);
+                statusMessage = $"Auto-Clean preview: {preview.CandidateCount} eligible dresser items.";
+                ImGui.OpenPopup(AutoCleanPopupId);
+            }
+            else
+            {
+                statusMessage = pendingAutoCleanPreview == null
+                    ? "Auto-Clean requires a loaded, open Glamour Dresser."
+                    : "No eligible unprotected duplicates found to restore.";
+            }
+        }
+
         if (dresserChangedSinceAnalysis)
         {
             ImGui.SameLine();
@@ -136,6 +172,47 @@ public sealed class MainWindow : Window, IDisposable
             ImGui.TextUnformatted("Dresser changed - refresh recommended.");
             ImGui.PopStyleColor();
         }
+    }
+
+    private void DrawAutoCleanConfirmation()
+    {
+        if (!ImGui.BeginPopupModal(AutoCleanPopupId, ImGuiWindowFlags.AlwaysAutoResize))
+            return;
+
+        if (pendingAutoCleanPreview is { } preview && !plugin.DuplicateRemover.IsRunning)
+        {
+            ImGui.TextUnformatted($"Restore {preview.CandidateCount} recommended duplicate item(s) to inventory?");
+            ImGui.Spacing();
+            ImGui.TextWrapped("Auto-Clean restores items from the Glamour Dresser to your inventory. It does not discard them.");
+            ImGui.TextWrapped("Keep the dresser open and make sure you have enough inventory space.");
+            ImGui.TextWrapped("Protected items and ignored model groups are excluded. Display filters do not limit Auto-Clean.");
+            ImGui.Spacing();
+
+            if (ImGui.Button("Start Auto-Clean"))
+            {
+                var started = plugin.DuplicateRemover.Start(preview);
+                statusMessage = started
+                    ? $"Auto-Clean started for {preview.CandidateCount} items. Use Stop Auto-Clean to cancel."
+                    : "Auto-Clean did not start. Check chat for details, then preview again.";
+                pendingAutoCleanPreview = null;
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel"))
+            {
+                pendingAutoCleanPreview = null;
+                ImGui.CloseCurrentPopup();
+            }
+        }
+        else
+        {
+            ImGui.TextWrapped("The preview is no longer valid. Reopen Auto-Clean to review live dresser items.");
+            if (ImGui.Button("Close"))
+                ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.EndPopup();
     }
 
     private void DrawStatus()
