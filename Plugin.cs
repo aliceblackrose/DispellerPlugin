@@ -61,13 +61,13 @@ public sealed class Plugin : IDalamudPlugin
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Open Dispeller. Use /dispeller clean to restore recommended duplicate glamours to inventory, or /dispeller stop to cancel cleanup.",
+            HelpMessage = "Open Dispeller to use Auto-Clean, or /dispeller clean to restore recommended duplicate glamours to inventory. Use /dispeller stop to cancel.",
         });
 
         PluginInterface.UiBuilder.Draw += WindowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi += ToggleMainUi;
 
-        Log.Information("Dispeller 2.1 loaded.");
+        Log.Information("Dispeller 2.2 loaded.");
     }
 
     private void OnDresserUpdated(IReadOnlyList<DresserItem> items)
