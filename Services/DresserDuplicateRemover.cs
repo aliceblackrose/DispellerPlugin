@@ -33,6 +33,15 @@ public sealed class DresserDuplicateRemover : IDisposable
     private bool disposed;
 
     public bool IsRunning { get; private set; }
+    public int RequestedCount => requestedCount;
+    public int RemovedCount => removedCount;
+    public int SkippedCount => skippedCount;
+
+    /// <summary>
+    /// Exact live slot/item selection the user has confirmed. The signature prevents
+    /// a changed dresser from silently cleaning a different set of items.
+    /// </summary>
+    public sealed record CleanupPreview(int CandidateCount, string CandidateSignature);
 
     public DresserDuplicateRemover(
         IFramework framework,
@@ -54,7 +63,24 @@ public sealed class DresserDuplicateRemover : IDisposable
         framework.Update += OnFrameworkUpdate;
     }
 
-    public unsafe bool Start()
+    /// <summary>
+    /// Gets an up-to-date cleanup preview without restoring any items.
+    /// Saved snapshots are never used for automatic removal.
+    /// </summary>
+    public CleanupPreview? Preview()
+    {
+        if (IsRunning)
+        {
+            chat.PrintError("[Dispeller] Duplicate cleanup is already running.");
+            return null;
+        }
+
+        return TryGetTargets(out var targets)
+            ? new CleanupPreview(targets.Count, GetCandidateSignature(targets))
+            : null;
+    }
+
+    public bool Start(CleanupPreview? expectedPreview = null)
     {
         if (IsRunning)
         {
@@ -62,9 +88,47 @@ public sealed class DresserDuplicateRemover : IDisposable
             return false;
         }
 
+        if (!TryGetTargets(out var targets))
+            return false;
+
+        // Re-scan immediately before executing a confirmed UI preview.
+        // Do not restore a different set of items if the dresser changed.
+        if (expectedPreview != null &&
+            (targets.Count != expectedPreview.CandidateCount ||
+             GetCandidateSignature(targets) != expectedPreview.CandidateSignature))
+        {
+            chat.PrintError("[Dispeller] Dresser contents or cleanup recommendations changed. Click Auto-Clean again to review the updated selection.");
+            return false;
+        }
+
+        if (targets.Count == 0)
+        {
+            chat.Print("[Dispeller] No unprotected duplicate-model removal candidates were found.");
+            return false;
+        }
+
+        pending.Clear();
+        foreach (var target in targets)
+            pending.Enqueue(target);
+
+        requestedCount = targets.Count;
+        removedCount = 0;
+        skippedCount = 0;
+        nextRemovalAt = Environment.TickCount64;
+        IsRunning = true;
+
+        chat.Print($"[Dispeller] Restoring {requestedCount} recommended duplicate{(requestedCount == 1 ? string.Empty : "s")} to inventory. Use /dispeller stop or the Stop Auto-Clean button to cancel.");
+        log.Information($"Starting Glamour Dresser duplicate cleanup with {requestedCount} candidates.");
+        return true;
+    }
+
+    private unsafe bool TryGetTargets(out List<RemovalTarget> targets)
+    {
+        targets = [];
+
         if (!dresserScanner.TryRefresh())
         {
-            chat.PrintError("[Dispeller] Open the Glamour Dresser, then run /dispeller clean again.");
+            chat.PrintError("[Dispeller] Open the Glamour Dresser before starting Auto-Clean.");
             return false;
         }
 
@@ -87,7 +151,7 @@ public sealed class DresserDuplicateRemover : IDisposable
             snapshotService.GetPrevious(),
             configuration);
 
-        var targets = analysis.Groups
+        targets = analysis.Groups
             .Where(group => !group.IsIgnored)
             .SelectMany(group => group.Items)
             .Where(item => item.IsRemovalCandidate)
@@ -96,26 +160,13 @@ public sealed class DresserDuplicateRemover : IDisposable
             .DistinctBy(target => target.PrismBoxIndex)
             .ToList();
 
-        if (targets.Count == 0)
-        {
-            chat.Print("[Dispeller] No unprotected duplicate-model removal candidates were found.");
-            return false;
-        }
-
-        pending.Clear();
-        foreach (var target in targets)
-            pending.Enqueue(target);
-
-        requestedCount = targets.Count;
-        removedCount = 0;
-        skippedCount = 0;
-        nextRemovalAt = Environment.TickCount64;
-        IsRunning = true;
-
-        chat.Print($"[Dispeller] Removing {requestedCount} recommended duplicate{(requestedCount == 1 ? string.Empty : "s")} from the Glamour Dresser. Use /dispeller stop to cancel.");
-        log.Information($"Starting Glamour Dresser duplicate cleanup with {requestedCount} candidates.");
         return true;
     }
+
+    private static string GetCandidateSignature(IEnumerable<RemovalTarget> targets) =>
+        string.Join(";", targets
+            .OrderBy(target => target.PrismBoxIndex)
+            .Select(target => $"{target.PrismBoxIndex}:{target.ItemId}"));
 
     public void Cancel()
     {
