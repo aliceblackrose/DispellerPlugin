@@ -3,6 +3,16 @@ name: Dispeller PR Build
 on:
   pull_request:
     branches: [ master ]
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dispeller-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -23,8 +33,14 @@ jobs:
           Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile latest.zip
           Expand-Archive -Force latest.zip "$env:AppData\XIVLauncher\addon\Hooks\dev"
 
+      - name: Run analysis regression checks
+        run: dotnet run --project tests/Dispeller.Analysis.Tests.csproj --configuration Release
+
+      - name: Restore locked dependencies
+        run: dotnet restore Dispeller.csproj --locked-mode
+
       - name: Build Release
-        run: dotnet build Dispeller.csproj --configuration Release
+        run: dotnet build Dispeller.csproj --configuration Release --no-restore
 
       - name: Upload plugin build
         uses: actions/upload-artifact@v4

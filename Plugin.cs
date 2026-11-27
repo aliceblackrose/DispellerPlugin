@@ -39,9 +39,11 @@ public sealed class Plugin : IDalamudPlugin
     {
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
+        Configuration.Normalize();
+
         ItemMetadataService = new ItemMetadataService(DataManager, PluginInterface, Log);
         SnapshotService = new SnapshotService(PluginInterface, PlayerState, Log);
-        DuplicateAnalyzer = new DuplicateAnalyzer(ItemMetadataService);
+        DuplicateAnalyzer = new DuplicateAnalyzer(ItemMetadataService.Get);
         DresserScanner = new DresserScanner(Framework, Log);
         DuplicateRemover = new DresserDuplicateRemover(
             Framework,
@@ -49,7 +51,6 @@ public sealed class Plugin : IDalamudPlugin
             ChatGui,
             DresserScanner,
             DuplicateAnalyzer,
-            SnapshotService,
             Configuration);
         DresserScanner.Updated += OnDresserUpdated;
 

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Dalamud.Plugin.Services;
 using Dispeller.Models;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
+using FFXIVClientStructs.FFXIV.Client.Game;
 
 namespace Dispeller.Services;
 
@@ -46,6 +47,11 @@ public sealed class DresserScanner : IDisposable
         }
     }
 
+    public bool HasCachedData
+    {
+        get { lock (syncRoot) return hasFingerprint; }
+    }
+
     public bool TryRefresh() => TryCapture(force: true);
 
     public void ClearCache()
@@ -80,11 +86,15 @@ public sealed class DresserScanner : IDisposable
     {
         try
         {
+            var manager = MirageManager.Instance();
+            if (manager == null || !manager->PrismBoxRequested || !manager->PrismBoxLoaded)
+                return false;
+
             var agent = AgentMiragePrismPrismBox.Instance();
             if (agent == null || !agent->IsAddonReady() || agent->Data == null)
                 return false;
 
-            var items = new List<DresserItem>(Math.Max(agent->Data->UsedSlots, 0));
+            var items = new List<DresserItem>(Math.Clamp(agent->Data->UsedSlots, 0, (int)PrismBoxSlotCount));
             var fingerprint = FnvOffsetBasis;
 
             foreach (var item in agent->Data->PrismBoxItems)

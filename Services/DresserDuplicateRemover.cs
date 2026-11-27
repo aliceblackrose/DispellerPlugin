@@ -14,6 +14,7 @@ namespace Dispeller.Services;
 public sealed class DresserDuplicateRemover : IDisposable
 {
     private const long RemovalIntervalMs = 650;
+    private const long ConfirmationTimeoutMs = 5000;
     private const uint PrismBoxSlotCount = 800;
     private const uint ItemIdModulo = 1_000_000;
 
@@ -22,11 +23,12 @@ public sealed class DresserDuplicateRemover : IDisposable
     private readonly IChatGui chat;
     private readonly DresserScanner dresserScanner;
     private readonly DuplicateAnalyzer duplicateAnalyzer;
-    private readonly SnapshotService snapshotService;
     private readonly Configuration configuration;
     private readonly Queue<RemovalTarget> pending = new();
 
     private long nextRemovalAt;
+    private long confirmationDeadline;
+    private RemovalTarget? inFlight;
     private int requestedCount;
     private int removedCount;
     private int skippedCount;
@@ -49,7 +51,6 @@ public sealed class DresserDuplicateRemover : IDisposable
         IChatGui chat,
         DresserScanner dresserScanner,
         DuplicateAnalyzer duplicateAnalyzer,
-        SnapshotService snapshotService,
         Configuration configuration)
     {
         this.framework = framework;
@@ -57,7 +58,6 @@ public sealed class DresserDuplicateRemover : IDisposable
         this.chat = chat;
         this.dresserScanner = dresserScanner;
         this.duplicateAnalyzer = duplicateAnalyzer;
-        this.snapshotService = snapshotService;
         this.configuration = configuration;
 
         framework.Update += OnFrameworkUpdate;
@@ -69,7 +69,7 @@ public sealed class DresserDuplicateRemover : IDisposable
     /// </summary>
     public CleanupPreview? Preview()
     {
-        if (IsRunning)
+        if (disposed || IsRunning)
         {
             chat.PrintError("[Dispeller] Duplicate cleanup is already running.");
             return null;
@@ -82,7 +82,7 @@ public sealed class DresserDuplicateRemover : IDisposable
 
     public bool Start(CleanupPreview? expectedPreview = null)
     {
-        if (IsRunning)
+        if (disposed || IsRunning)
         {
             chat.PrintError("[Dispeller] Duplicate cleanup is already running.");
             return false;
@@ -108,6 +108,7 @@ public sealed class DresserDuplicateRemover : IDisposable
         }
 
         pending.Clear();
+        inFlight = null;
         foreach (var target in targets)
             pending.Enqueue(target);
 
@@ -140,23 +141,23 @@ public sealed class DresserDuplicateRemover : IDisposable
         }
 
         var liveItems = dresserScanner.GetDresserItems();
-        if (liveItems.Count == 0)
-        {
-            chat.PrintError("[Dispeller] No live Glamour Dresser items were found.");
-            return false;
-        }
-
         var analysis = duplicateAnalyzer.Analyze(
             liveItems,
-            snapshotService.GetPrevious(),
-            configuration);
+            null,
+            configuration.ProtectedItemIds,
+            configuration.IgnoredGroupKeys,
+            configuration.PreserveDyedItems);
 
         targets = analysis.Groups
             .Where(group => !group.IsIgnored)
-            .SelectMany(group => group.Items)
-            .Where(item => item.IsRemovalCandidate)
-            .Select(item => new RemovalTarget(item.DresserItem.Slot, item.Metadata.ItemId, item.Metadata.Name))
-            .Where(target => target.PrismBoxIndex < PrismBoxSlotCount)
+            .SelectMany(group => group.Items
+                .Where(item => item.IsRemovalCandidate)
+                .Select(item => new RemovalTarget(
+                    item.DresserItem.Slot, item.Metadata.ItemId, item.Metadata.Name,
+                    item.DresserItem.Stain1, item.DresserItem.Stain2,
+                    group.RecommendedKeeper.DresserItem.Slot, group.RecommendedKeeper.Metadata.ItemId)))
+            .Where(target => target.PrismBoxIndex < PrismBoxSlotCount &&
+                target.KeeperIndex < PrismBoxSlotCount && target.PrismBoxIndex != target.KeeperIndex)
             .DistinctBy(target => target.PrismBoxIndex)
             .ToList();
 
@@ -166,7 +167,7 @@ public sealed class DresserDuplicateRemover : IDisposable
     private static string GetCandidateSignature(IEnumerable<RemovalTarget> targets) =>
         string.Join(";", targets
             .OrderBy(target => target.PrismBoxIndex)
-            .Select(target => $"{target.PrismBoxIndex}:{target.ItemId}"));
+            .Select(target => $"{target.PrismBoxIndex}:{target.ItemId}:{target.Stain1}:{target.Stain2}:{target.KeeperIndex}:{target.KeeperItemId}"));
 
     public void Cancel()
     {
@@ -177,9 +178,13 @@ public sealed class DresserDuplicateRemover : IDisposable
         }
 
         var remaining = pending.Count;
+        var awaitingConfirmation = inFlight != null;
         pending.Clear();
+        inFlight = null;
         IsRunning = false;
 
+        if (awaitingConfirmation)
+            chat.Print("[Dispeller] The last restore request was already sent and may still complete.");
         chat.Print($"[Dispeller] Duplicate cleanup stopped. Removed {removedCount}; {remaining} candidate{(remaining == 1 ? string.Empty : "s")} left queued.");
         log.Information($"Glamour Dresser duplicate cleanup cancelled after {removedCount} removals.");
     }
@@ -206,24 +211,48 @@ public sealed class DresserDuplicateRemover : IDisposable
             return;
         }
 
-        var target = pending.Peek();
-        if (target.PrismBoxIndex >= PrismBoxSlotCount)
+        // The native call accepting a request is not proof that the item was restored.
+        // Never send another restore until the previous slot is observed empty.
+        if (inFlight is { } sent)
         {
-            pending.Dequeue();
-            skippedCount++;
+            var observed = manager->PrismBoxItemIds[(int)sent.PrismBoxIndex];
+            if (observed == 0)
+            {
+                pending.Dequeue();
+                inFlight = null;
+                removedCount++;
+                log.Information($"Confirmed restored slot {sent.PrismBoxIndex} ({sent.ItemId}).");
+                nextRemovalAt = now + RemovalIntervalMs;
+                return;
+            }
+
+            if (observed % ItemIdModulo != sent.ItemId || now >= confirmationDeadline)
+            {
+                Abort("The last restore could not be confirmed. No further restore requests were sent.");
+                return;
+            }
+
             nextRemovalAt = now + RemovalIntervalMs;
             return;
         }
 
-        var rawItemId = manager->PrismBoxItemIds[(int)target.PrismBoxIndex];
-        var currentItemId = rawItemId % ItemIdModulo;
+        var target = pending.Peek();
 
-        if (currentItemId != target.ItemId)
+        // Re-evaluate the current recommendations, including changed protection rules,
+        // dye state, ignored groups and the existence of the original keeper.
+        if (!TryGetTargets(out var liveTargets))
+        {
+            Abort("Could not refresh live recommendations.");
+            return;
+        }
+
+        if (!liveTargets.Contains(target) ||
+            manager->PrismBoxItemIds[(int)target.PrismBoxIndex] % ItemIdModulo != target.ItemId ||
+            manager->PrismBoxItemIds[(int)target.KeeperIndex] % ItemIdModulo != target.KeeperItemId)
         {
             pending.Dequeue();
             skippedCount++;
-            log.Warning(
-                $"Skipped stale dresser slot {target.PrismBoxIndex}: expected item {target.ItemId}, found {currentItemId}.");
+            log.Warning($"Skipped dresser slot {target.PrismBoxIndex}: its live recommendation or keeper changed.");
             nextRemovalAt = now + RemovalIntervalMs;
             return;
         }
@@ -234,9 +263,8 @@ public sealed class DresserDuplicateRemover : IDisposable
             return;
         }
 
-        pending.Dequeue();
-        removedCount++;
-        log.Information($"Restored duplicate '{target.Name}' ({target.ItemId}) from dresser slot {target.PrismBoxIndex}.");
+        inFlight = target;
+        confirmationDeadline = now + ConfirmationTimeoutMs;
         nextRemovalAt = now + RemovalIntervalMs;
     }
 
@@ -247,7 +275,7 @@ public sealed class DresserDuplicateRemover : IDisposable
         // The scanner will continue polling, but force a final refresh so the UI/snapshot catches up quickly.
         dresserScanner.TryRefresh();
 
-        var skippedText = skippedCount > 0 ? $" Skipped {skippedCount} stale slot{(skippedCount == 1 ? string.Empty : "s")}." : string.Empty;
+        var skippedText = skippedCount > 0 ? $" Skipped {skippedCount} changed slot{(skippedCount == 1 ? string.Empty : "s")}." : string.Empty;
         chat.Print($"[Dispeller] Duplicate cleanup finished: removed {removedCount} of {requestedCount}.{skippedText}");
         log.Information($"Glamour Dresser duplicate cleanup finished: removed {removedCount}/{requestedCount}, skipped {skippedCount}.");
     }
@@ -255,9 +283,13 @@ public sealed class DresserDuplicateRemover : IDisposable
     private void Abort(string reason)
     {
         var remaining = pending.Count;
+        var awaitingConfirmation = inFlight != null;
         pending.Clear();
+        inFlight = null;
         IsRunning = false;
 
+        if (awaitingConfirmation)
+            chat.Print("[Dispeller] The last restore request may still complete; check the dresser before restarting.");
         chat.PrintError($"[Dispeller] Duplicate cleanup stopped: {reason} Removed {removedCount}; {remaining} candidate{(remaining == 1 ? string.Empty : "s")} not processed.");
         log.Warning($"Glamour Dresser duplicate cleanup aborted: {reason}");
     }
@@ -269,9 +301,12 @@ public sealed class DresserDuplicateRemover : IDisposable
 
         framework.Update -= OnFrameworkUpdate;
         pending.Clear();
+        inFlight = null;
         IsRunning = false;
         disposed = true;
     }
 
-    private sealed record RemovalTarget(uint PrismBoxIndex, uint ItemId, string Name);
+    private sealed record RemovalTarget(
+        uint PrismBoxIndex, uint ItemId, string Name, byte Stain1, byte Stain2,
+        uint KeeperIndex, uint KeeperItemId);
 }
