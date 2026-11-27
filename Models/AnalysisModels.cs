@@ -9,6 +9,8 @@ public sealed class AnalyzedItem
     public required ItemMetadata Metadata { get; init; }
 
     public bool IsProtected { get; set; }
+    public bool IsDyedProtected { get; set; }
+    public bool IsEffectivelyProtected => IsProtected || IsDyedProtected;
     public bool IsRecommendedKeeper { get; set; }
     public bool IsRemovalCandidate { get; set; }
     public int KeepScore { get; set; }
@@ -29,7 +31,7 @@ public sealed class DuplicateGroup
         Items.Find(item => item.IsRecommendedKeeper) ?? Items[0];
 
     public int RemovalCandidateCount =>
-        Items.FindAll(item => item.IsRemovalCandidate).Count;
+        IsIgnored ? 0 : System.Linq.Enumerable.Count(Items, item => item.IsRemovalCandidate);
 }
 
 public sealed class ScanResult

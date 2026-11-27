@@ -11,25 +11,27 @@ namespace Dispeller.Services;
 /// </summary>
 public sealed class DuplicateAnalyzer
 {
-    private readonly ItemMetadataService metadataService;
+    private readonly Func<uint, ItemMetadata?> getMetadata;
 
-    public DuplicateAnalyzer(ItemMetadataService metadataService)
+    public DuplicateAnalyzer(Func<uint, ItemMetadata?> getMetadata)
     {
-        this.metadataService = metadataService;
+        this.getMetadata = getMetadata;
     }
 
     public ScanResult Analyze(
         IReadOnlyList<DresserItem> rawItems,
         DresserSnapshot? previousSnapshot,
-        Configuration configuration)
+        IReadOnlySet<uint> protectedItemIds,
+        IReadOnlySet<string> ignoredGroupKeys,
+        bool preserveDyedItems)
     {
         var uniqueItems = GetUniqueItems(rawItems);
-        var analyzed = CreateAnalyzedItems(uniqueItems, configuration.ProtectedItemIds);
+        var analyzed = CreateAnalyzedItems(uniqueItems, protectedItemIds, preserveDyedItems);
 
         var groups = analyzed
             .GroupBy(item => (item.Metadata.Slot, item.Metadata.Model))
             .Where(group => group.Count() > 1)
-            .Select(group => BuildGroup(group.Key.Slot, group.Key.Model, group.ToList(), configuration))
+            .Select(group => BuildGroup(group.Key.Slot, group.Key.Model, group.ToList(), ignoredGroupKeys))
             .OrderBy(group => (int)group.Slot)
             .ThenByDescending(group => group.Items.Count)
             .ThenBy(group => group.Model.Primary)
@@ -82,14 +84,14 @@ public sealed class DuplicateAnalyzer
 
     private List<AnalyzedItem> CreateAnalyzedItems(
         IReadOnlyList<DresserItem> items,
-        IReadOnlySet<uint>? protectedItemIds)
+        IReadOnlySet<uint>? protectedItemIds,
+        bool preserveDyedItems = false)
     {
-        metadataService.Warm(items.Select(item => item.ItemId));
 
         var analyzed = new List<AnalyzedItem>(items.Count);
         foreach (var dresserItem in items)
         {
-            var metadata = metadataService.Get(dresserItem.ItemId);
+            var metadata = getMetadata(dresserItem.ItemId);
             if (metadata == null || metadata.Model.IsEmpty)
                 continue;
 
@@ -98,6 +100,7 @@ public sealed class DuplicateAnalyzer
                 DresserItem = dresserItem,
                 Metadata = metadata,
                 IsProtected = protectedItemIds?.Contains(dresserItem.ItemId) == true,
+                IsDyedProtected = preserveDyedItems && (dresserItem.Stain1 != 0 || dresserItem.Stain2 != 0),
             });
         }
 
@@ -108,8 +111,10 @@ public sealed class DuplicateAnalyzer
         GearSlot slot,
         ModelSignature model,
         List<AnalyzedItem> items,
-        Configuration configuration)
+        IReadOnlySet<string> ignoredGroupKeys)
     {
+        var key = CreateGroupKey(slot, model);
+        var isIgnored = ignoredGroupKeys.Contains(key);
         foreach (var item in items)
             item.KeepScore = CalculateKeepScore(item);
 
@@ -117,6 +122,7 @@ public sealed class DuplicateAnalyzer
             .OrderByDescending(item => item.KeepScore)
             .ThenBy(item => item.Metadata.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(item => item.Metadata.ItemId)
+            .ThenBy(item => item.DresserItem.Slot)
             .First();
 
         var maximumDyeCount = items.Max(item => item.Metadata.DyeCount);
@@ -125,10 +131,14 @@ public sealed class DuplicateAnalyzer
         foreach (var item in items)
         {
             item.IsRecommendedKeeper = ReferenceEquals(item, keeper);
-            item.IsRemovalCandidate = !item.IsRecommendedKeeper && !item.IsProtected;
+            item.IsRemovalCandidate = !isIgnored && !item.IsRecommendedKeeper && !item.IsEffectivelyProtected;
 
             if (item.IsProtected)
                 item.RecommendationReasons.Add("Protected by you.");
+            if (item.IsDyedProtected)
+                item.RecommendationReasons.Add("Protected because a stored dye is present.");
+            if (isIgnored)
+                item.RecommendationReasons.Add("This model group is ignored.");
 
             if (item.IsRecommendedKeeper)
             {
@@ -149,8 +159,8 @@ public sealed class DuplicateAnalyzer
                 if (item.Metadata.DyeCount < keeper.Metadata.DyeCount)
                     item.RecommendationReasons.Add("Has fewer dye channels than the recommended keeper.");
 
-                if (item.IsProtected)
-                    item.RecommendationReasons.Add("Not suggested for removal because it is protected.");
+                if (item.IsEffectivelyProtected)
+                    item.RecommendationReasons.Add("Not suggested for restoration because it is protected.");
                 else if (item.RecommendationReasons.Count == 0)
                     item.RecommendationReasons.Add("Shares the same model and is not protected.");
             }
@@ -158,12 +168,10 @@ public sealed class DuplicateAnalyzer
 
         items = items
             .OrderByDescending(item => item.IsRecommendedKeeper)
-            .ThenByDescending(item => item.IsProtected)
+            .ThenByDescending(item => item.IsEffectivelyProtected)
             .ThenByDescending(item => item.KeepScore)
             .ThenBy(item => item.Metadata.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
-
-        var key = CreateGroupKey(slot, model);
 
         return new DuplicateGroup
         {
@@ -171,7 +179,7 @@ public sealed class DuplicateAnalyzer
             Model = model,
             Key = key,
             Items = items,
-            IsIgnored = configuration.IgnoredGroupKeys.Contains(key),
+            IsIgnored = isIgnored,
         };
     }
 
@@ -179,7 +187,7 @@ public sealed class DuplicateAnalyzer
     {
         var score = 0;
 
-        if (item.IsProtected)
+        if (item.IsEffectivelyProtected)
             score += 10_000;
 
         // Dye flexibility is the strongest objective difference between identical models.

@@ -17,8 +17,18 @@ public sealed class Configuration : IPluginConfiguration
     public bool ArmoireOnly { get; set; }
     public bool HideIgnoredGroups { get; set; } = true;
     public bool ShowModelIds { get; set; }
+    public bool PreserveDyedItems { get; set; } = true;
     public int MinimumGroupSize { get; set; } = 2;
     public ResultSortMode SortMode { get; set; } = ResultSortMode.Slot;
+
+    public void Normalize()
+    {
+        ProtectedItemIds ??= [];
+        IgnoredGroupKeys ??= [];
+        MinimumGroupSize = Math.Clamp(MinimumGroupSize, 2, 5);
+        if (!Enum.IsDefined(SlotFilter)) SlotFilter = GearSlot.All;
+        if (!Enum.IsDefined(SortMode)) SortMode = ResultSortMode.Slot;
+    }
 
     public void Save() =>
         Plugin.PluginInterface.SavePluginConfig(this);

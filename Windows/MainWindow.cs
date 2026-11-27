@@ -18,6 +18,8 @@ public sealed class MainWindow : Window, IDisposable
 
     private readonly List<DresserItem> currentItems = [];
     private ScanResult? result;
+    private DresserSnapshot? displayedSnapshot;
+    private bool hasData;
 
     private string searchText = string.Empty;
     private string statusMessage = "Ready.";
@@ -60,6 +62,8 @@ public sealed class MainWindow : Window, IDisposable
     {
         currentItems.Clear();
         result = null;
+        displayedSnapshot = null;
+        hasData = false;
         initialLoadAttempted = false;
         dresserChangedSinceAnalysis = false;
         pendingAutoCleanPreview = null;
@@ -71,6 +75,11 @@ public sealed class MainWindow : Window, IDisposable
         if (!initialLoadAttempted && Plugin.PlayerState.IsLoaded)
         {
             initialLoadAttempted = true;
+            LoadBestAvailableData(refreshIfOpen: false);
+        }
+
+        else if (dresserChangedSinceAnalysis && Plugin.PlayerState.IsLoaded)
+        {
             LoadBestAvailableData(refreshIfOpen: false);
         }
 
@@ -185,7 +194,7 @@ public sealed class MainWindow : Window, IDisposable
             ImGui.Spacing();
             ImGui.TextWrapped("Auto-Clean restores items from the Glamour Dresser to your inventory. It does not discard them.");
             ImGui.TextWrapped("Keep the dresser open and make sure you have enough inventory space.");
-            ImGui.TextWrapped("Protected items and ignored model groups are excluded. Display filters do not limit Auto-Clean.");
+            ImGui.TextWrapped("Protected items, ignored model groups and (by default) dyed items are excluded. Display filters do not limit Auto-Clean.");
             ImGui.Spacing();
 
             if (ImGui.Button("Start Auto-Clean"))
@@ -312,8 +321,21 @@ public sealed class MainWindow : Window, IDisposable
             plugin.Configuration.SlotFilter = GearSlot.All;
             plugin.Configuration.ArmoireOnly = false;
             plugin.Configuration.MinimumGroupSize = 2;
+            plugin.Configuration.HideIgnoredGroups = true;
+            plugin.Configuration.ShowModelIds = false;
+            plugin.Configuration.SortMode = ResultSortMode.Slot;
             plugin.Configuration.Save();
         }
+
+        var preserveDyed = plugin.Configuration.PreserveDyedItems;
+        if (ImGui.Checkbox("Protect dyed items", ref preserveDyed))
+        {
+            plugin.Configuration.PreserveDyedItems = preserveDyed;
+            plugin.Configuration.Save();
+            AnalyzeCurrentItems();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Exclude items with either stored dye from Auto-Clean recommendations.");
 
         if (plugin.Configuration.ProtectedItemIds.Count > 0 || plugin.Configuration.IgnoredGroupKeys.Count > 0)
         {
@@ -542,7 +564,7 @@ public sealed class MainWindow : Window, IDisposable
         }
         else
         {
-            ImGui.TextWrapped("No safe removal suggestion because the remaining duplicates are protected.");
+            ImGui.TextWrapped(group.IsIgnored ? "This group is excluded from Auto-Clean." : "No eligible restoration candidates remain.");
         }
 
         foreach (var item in group.Items)
@@ -571,11 +593,11 @@ public sealed class MainWindow : Window, IDisposable
             ? "★ KEEP"
             : item.IsRemovalCandidate
                 ? "↳ candidate"
-                : "🔒 protected";
+                : item.IsEffectivelyProtected ? "Protected" : "Excluded";
 
         var textColor = item.IsRecommendedKeeper
             ? LightMint
-            : item.IsProtected
+            : item.IsEffectivelyProtected
                 ? LightPurple
                 : BrightWhite;
 
@@ -687,8 +709,10 @@ public sealed class MainWindow : Window, IDisposable
         var refreshed = refreshIfOpen && plugin.DresserScanner.TryRefresh();
 
         var liveItems = plugin.DresserScanner.GetDresserItems();
-        if (liveItems.Count > 0)
+        if (plugin.DresserScanner.HasCachedData)
         {
+            displayedSnapshot = null;
+            hasData = true;
             currentItems.Clear();
             currentItems.AddRange(liveItems);
 
@@ -705,19 +729,14 @@ public sealed class MainWindow : Window, IDisposable
         }
 
         var snapshot = plugin.SnapshotService.GetCurrent();
-        if (snapshot != null && snapshot.Items.Count > 0)
+        if (snapshot != null)
         {
+            displayedSnapshot = snapshot;
+            hasData = true;
             currentItems.Clear();
             currentItems.AddRange(snapshot.ToDresserItems());
 
             AnalyzeCurrentItems();
-
-            if (result != null)
-            {
-                result.IsFromSavedSnapshot = true;
-                result.SnapshotUpdatedAtUtc = snapshot.UpdatedAtUtc;
-                result.SnapshotCharacterName = snapshot.CharacterName;
-            }
 
             statusMessage =
                 "The Glamour Dresser is not currently available, so Dispeller loaded your saved per-character snapshot.";
@@ -726,6 +745,8 @@ public sealed class MainWindow : Window, IDisposable
         }
 
         result = null;
+        displayedSnapshot = null;
+        hasData = false;
         currentItems.Clear();
 
         statusMessage = refreshIfOpen
@@ -735,7 +756,7 @@ public sealed class MainWindow : Window, IDisposable
 
     private void AnalyzeCurrentItems()
     {
-        if (currentItems.Count == 0)
+        if (!hasData)
         {
             result = null;
             return;
@@ -744,9 +765,16 @@ public sealed class MainWindow : Window, IDisposable
         result = plugin.DuplicateAnalyzer.Analyze(
             currentItems,
             plugin.SnapshotService.GetPrevious(),
-            plugin.Configuration);
+            plugin.Configuration.ProtectedItemIds,
+            plugin.Configuration.IgnoredGroupKeys,
+            plugin.Configuration.PreserveDyedItems);
 
-        dresserChangedSinceAnalysis = false;
+        if (displayedSnapshot is { } snapshot)
+        {
+            result.IsFromSavedSnapshot = true;
+            result.SnapshotUpdatedAtUtc = snapshot.UpdatedAtUtc;
+            result.SnapshotCharacterName = snapshot.CharacterName;
+        }
     }
 
     private static string GetSortName(ResultSortMode mode) => mode switch
